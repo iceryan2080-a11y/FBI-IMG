@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from .config import BLUR_CLASSES, OCR_CLASSES
 from .detector import Detector
 from .ocr import OcrEngine
-from .qr_client import decode_crop, decode_full
+from .qr_client import decode_crop, decode_full, extract_full
 from .redactor import COLOR_FOUND, COLOR_OK, COLOR_RISK, blur_region, draw_detection
 
 app = FastAPI(title="FBI-IMG Backend")
@@ -32,6 +32,19 @@ def _b64_jpg(img) -> str:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/extract-qr")
+async def extract_qr(file: UploadFile = File(...)):
+    """Botón 'Extract': recupera datos de un QR incompleto/dañado en la imagen."""
+    raw = await file.read()
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "imagen inválida o formato no soportado")
+    codes = await extract_full(img)
+    if codes is None:
+        raise HTTPException(503, "qr-service no disponible")
+    return {"found": len(codes), "codes": codes}
 
 
 @app.post("/analyze")

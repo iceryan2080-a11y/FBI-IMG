@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { analyzeImage } from "../api.js";
+import { analyzeImage, extractQr } from "../api.js";
 import useReveal from "../useReveal.js";
 
 const RISK_COLORS = {
@@ -40,6 +40,9 @@ export default function AnalyzerPanel() {
   const [dragging, setDragging] = useState(false);
   // vista de la imagen resultado: procesada (censura), anotada (señalar), original
   const [view, setView] = useState("procesada");
+  // botón "Extract": recuperación de QR incompletos (flujo aparte)
+  const [extract, setExtract] = useState(null);
+  const [extracting, setExtracting] = useState(false);
 
   useEffect(() => () => previewUrl && URL.revokeObjectURL(previewUrl), [previewUrl]);
 
@@ -50,6 +53,21 @@ export default function AnalyzerPanel() {
     setPreviewUrl(URL.createObjectURL(f));
     setResult(null);
     setError(null);
+    setExtract(null);
+  };
+
+  const runExtract = async () => {
+    if (!file || extracting) return;
+    setExtracting(true);
+    setError(null);
+    try {
+      setExtract(await extractQr(file));
+    } catch (e) {
+      setExtract(null);
+      setError(e.message);
+    } finally {
+      setExtracting(false);
+    }
   };
 
   const submit = async () => {
@@ -136,13 +154,40 @@ export default function AnalyzerPanel() {
                   >{m}</button>
                 ))}
               </div>
-              <button className="btn-primary btn-analyze" onClick={submit} disabled={loading || !file}>
-                {loading ? "escaneando…" : "ANALIZAR"}
-              </button>
+              <div className="controls-actions">
+                <button className="btn-extract" onClick={runExtract} disabled={extracting || !file}
+                        title="Recupera datos de un QR incompleto o dañado">
+                  {extracting ? "extrayendo…" : "⚡ Extract (QR incompleto)"}
+                </button>
+                <button className="btn-primary btn-analyze" onClick={submit} disabled={loading || !file}>
+                  {loading ? "escaneando…" : "ANALIZAR"}
+                </button>
+              </div>
             </div>
 
-            {loading && <div className="progress"><div className="progress-bar" /></div>}
+            {(loading || extracting) && <div className="progress"><div className="progress-bar" /></div>}
             {error && <p className="error">✖ {error}</p>}
+
+            {extract && (
+              <div className="extract-box">
+                <p className="extract-head">
+                  ⚡ Extracción de QR: <strong>{extract.found}</strong> recuperado(s)
+                </p>
+                {extract.found === 0 && (
+                  <p className="extract-empty">
+                    No se pudo recuperar ningún QR. El daño puede superar la capacidad
+                    de corrección de errores del código.
+                  </p>
+                )}
+                {extract.codes.map((c, i) => (
+                  <div key={i} className="extract-item">
+                    <Badge kind={c.risk_type} />
+                    <code>{c.content}</code>
+                    <span className="extract-engine">{c.engine}</span>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {result && (
               <div className="result">

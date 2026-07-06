@@ -40,3 +40,21 @@ async def decode_crop(img_bgr, bbox):
 async def decode_full(img_bgr):
     """Escanea la imagen completa (funciona aunque el modelo no detecte qr_code)."""
     return await _post_image(img_bgr)
+
+
+async def extract_full(img_bgr):
+    """Recuperación agresiva de QR incompletos vía qr-service /extract."""
+    ok, buf = cv2.imencode(".png", img_bgr)
+    if not ok:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{QR_SERVICE_URL}/extract",
+                files={"file": ("img.png", buf.tobytes(), "image/png")},
+            )
+            r.raise_for_status()
+            return r.json().get("codes", [])
+    except httpx.HTTPError as e:
+        log.error("qr-service /extract no disponible: %s", e)
+        return None

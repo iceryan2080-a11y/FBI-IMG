@@ -13,3 +13,18 @@ export async function analyzeImage(file, mode) {
   }
   return res.json();
 }
+
+export async function extractQr(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/extract-qr", { method: "POST", body: fd });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body.detail) detail = body.detail;
+    } catch { /* respuesta sin JSON */ }
+    throw new Error(detail);
+  }
+  return res.json();
+}

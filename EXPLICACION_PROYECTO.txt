@@ -1,0 +1,293 @@
+================================================================================
+                              FBI-IMG
+   Detección y censura automática de datos confidenciales en imágenes
+              Proyecto de Inteligencia Artificial aplicada
+================================================================================
+
+
+1. EL PROBLEMA QUE RESUELVE
+--------------------------------------------------------------------------------
+Cada día se comparten fotos de oficinas, escritorios y pantallas (en redes
+sociales, informes, tickets de soporte, presentaciones) que filtran información
+confidencial sin que nadie lo note: un código QR con la clave del WiFi pegado
+en la pared, un post-it con una contraseña, una cédula sobre el escritorio, un
+monitor con credenciales visibles, un documento con datos personales.
+
+Un humano revisando fotos una por una es lento, caro y se equivoca. FBI-IMG
+automatiza esa revisión con visión artificial: recibe una imagen, ENCUENTRA las
+zonas de riesgo, LEE su contenido para confirmar si es sensible, y CENSURA
+(difumina) esas zonas antes de que la imagen salga de la organización.
+
+Es un sistema de tipo DLP (Data Loss Prevention) pero para imágenes, y corre
+100% en local: ninguna foto sale de la red del usuario, cumpliendo el principio
+de "privacy by design".
+
+
+2. QUÉ HACE EXACTAMENTE (LAS TRES SOLUCIONES / MODOS)
+--------------------------------------------------------------------------------
+El usuario sube una imagen desde una interfaz web y elige uno de tres modos,
+de menor a mayor profundidad de análisis:
+
+  MODO LIGERO    -> Detección visual (YOLO11) de objetos sensibles: códigos QR,
+                    pantallas, documentos, cédulas/ID, texto manuscrito y
+                    post-its. Además decodifica los QR encontrados y clasifica
+                    el riesgo de su contenido (WiFi, credenciales, URL, email,
+                    vCard). Es el modo más rápido.
+
+  MODO MEDIO     -> Todo lo del ligero + OCR (reconocimiento óptico de
+                    caracteres con EasyOCR, español e inglés) sobre las zonas
+                    detectadas como documento/pantalla/nota/manuscrito.
+                    El texto leído pasa por expresiones regulares que detectan:
+                    contraseñas, usuarios/logins, correos electrónicos,
+                    números de tarjeta (13-16 dígitos) y cédulas panameñas.
+
+  MODO COMPLETO  -> Todo lo anterior + CENSURA AUTOMÁTICA: aplica desenfoque
+                    gaussiano (OpenCV, kernel 51x51) sobre cada zona de riesgo,
+                    dejando la imagen segura para compartir.
+
+Además de la imagen procesada, el sistema devuelve:
+
+  - Un REPORTE JSON con cada detección: clase, confianza del modelo, caja
+    delimitadora (bounding box), hallazgos concretos (contenido del QR y su
+    tipo de riesgo, textos sensibles encontrados con su tipo), y si la zona
+    fue censurada.
+  - Una IMAGEN ANOTADA ("señalar datos comprometedores"): la foto original
+    con cajas dibujadas señalando cada objeto detectado. Código de colores:
+    rojo = hallazgo confirmado (QR decodificado, credencial leída),
+    ámbar = zona de riesgo, verde = detección sin riesgo. Cada palabra o
+    frase sensible que encuentra el OCR lleva su propia caja con etiqueta.
+
+
+3. ARQUITECTURA: MICROSERVICIOS EN DOCKER
+--------------------------------------------------------------------------------
+El sistema son 4 contenedores independientes en una red interna (fbi-net):
+
+  [1] FRONTEND (React 18 + Vite, servido por nginx) - puerto 8080
+      Interfaz web: subir imagen (drag & drop), elegir modo, ver resultados
+      (imagen censurada / anotada / original, contadores, tabla de hallazgos).
+      nginx hace de proxy: el navegador llama a /api/... y nginx reenvía al
+      backend, así el usuario nunca habla directo con los servicios de IA.
+
+  [2] BACKEND (Python + FastAPI) - puerto 8000 - EL CEREBRO
+      Orquesta todo el pipeline de IA:
+        detector.py  -> YOLO11 (red neuronal de detección de objetos)
+        ocr.py       -> EasyOCR (redes neuronales de lectura de texto) + regex
+        redactor.py  -> blur gaussiano y dibujo de anotaciones (OpenCV)
+        qr_client.py -> cliente HTTP hacia el microservicio de QR
+
+  [3] QR-SERVICE (Python + FastAPI + pyzbar) - sin puerto expuesto
+      Decodifica códigos QR y clasifica el riesgo del contenido. Va separado
+      porque decodificar QR es una responsabilidad distinta a la detección
+      visual: se puede escalar, reiniciar o cambiar de librería sin tocar la
+      IA. Al no exponer puerto, solo el backend puede hablarle (seguridad).
+      Usa pyzbar (algoritmo clásico, muy robusto) con fallback al detector
+      QR de OpenCV si pyzbar no encuentra nada.
+
+  [4] TRAINER (Python + Ultralytics) - perfil aparte, solo corre al entrenar
+      Realiza el fine-tuning del modelo YOLO11 con el dataset propio y
+      deposita el mejor peso (best.pt) en un volumen compartido que el
+      backend lee al arrancar.
+
+Flujo de una petición:
+  navegador -> frontend(:8080) -> /api/analyze -> backend(:8000)
+  backend: YOLO detecta cajas -> por cada QR llama al qr-service(:8100)
+  -> OCR sobre zonas de texto (modo medio/completo) -> blur (modo completo)
+  -> genera imagen anotada -> responde JSON + 2 imágenes en base64.
+
+
+4. DÓNDE ESTÁ LA IA (Y DÓNDE NO)
+--------------------------------------------------------------------------------
+CON INTELIGENCIA ARTIFICIAL (redes neuronales profundas sobre PyTorch):
+
+  a) YOLO11 (You Only Look Once, versión 11, de Ultralytics)
+     - Red neuronal convolucional de detección de objetos en una sola pasada:
+       mira la imagen completa una vez y predice simultáneamente TODAS las
+       cajas delimitadoras con su clase y su confianza.
+     - Variante usada: YOLO11n ("nano"): ~2.6 millones de parámetros,
+       diseñada para inferencia rápida en CPU.
+     - Entrada: imagen reescalada a 640x640 con letterbox (mantiene la
+       proporción, rellena los bordes). Esto además controla la saturación
+       del servidor: toda imagen, pese lo grande que sea, cuesta lo mismo.
+     - Salida: lista de detecciones [clase, confianza, x1, y1, x2, y2].
+     - Se filtra por umbral de confianza configurable (CONF_THRESHOLD):
+       0.75 con el modelo entrenado (minimiza falsos positivos), 0.35
+       mientras se usa el modelo base.
+
+  b) EasyOCR (lectura de texto en imágenes)
+     Internamente son DOS redes neuronales encadenadas:
+     - CRAFT (Character Region Awareness For Text detection): red
+       convolucional que localiza DÓNDE hay texto en la imagen (devuelve
+       regiones/cajas de texto).
+     - CRNN (Convolutional Recurrent Neural Network): red convolucional +
+       recurrente + CTC que transcribe QUÉ dice cada región (reconocimiento
+       carácter a carácter). Cargada con diccionarios de español e inglés.
+     - Antes de leer, la zona pasa por un preprocesado clásico que reduce
+       falsos negativos: escala de grises + aumento de contraste (x1.5) +
+       umbral adaptativo gaussiano (binarización blanco/negro).
+
+SIN IA (algoritmos clásicos deterministas — decisión de diseño consciente):
+
+  - Decodificación de QR: pyzbar y cv2.QRCodeDetector. Un QR es un formato
+    geométrico exacto; no necesita red neuronal para leerse, y un algoritmo
+    clásico es más fiable y barato.
+  - Clasificación de riesgo del texto: expresiones regulares (patrones para
+    "WIFI:", "password/clave/pwd/pin", emails, tarjetas, cédulas, vCard).
+    Reglas explícitas = explicables y auditables, importante en seguridad.
+  - Censura: desenfoque gaussiano de OpenCV. La anotación: dibujo de
+    rectángulos y etiquetas.
+
+Esta combinación es deliberada: la IA hace lo que solo la IA puede hacer
+(VER dónde hay objetos sensibles y LEER texto en fotos reales), y las reglas
+deterministas toman las decisiones (qué es riesgo, qué se censura). Así el
+comportamiento crítico del sistema es predecible y explicable.
+
+
+5. EL ENTRENAMIENTO, EN DETALLE
+--------------------------------------------------------------------------------
+5.1 Estrategia: TRANSFER LEARNING (fine-tuning)
+
+  No se entrena una red desde cero (requeriría cientos de miles de imágenes y
+  semanas de GPU). Se parte de YOLO11n PRE-ENTRENADO en COCO (dataset de ~330
+  mil imágenes y 80 clases genéricas: personas, coches, laptops...). Esa red
+  ya sabe "ver": sus primeras capas detectan bordes, texturas y formas
+  universales. El fine-tuning reutiliza ese conocimiento y re-entrena la red
+  para que su cabeza de detección reconozca NUESTRAS 6 clases:
+
+     0: qr_code           (códigos QR)
+     1: screen            (pantallas/monitores encendidos)
+     2: document          (documentos impresos)
+     3: id_card           (cédulas / tarjetas de identificación)
+     4: handwritten_text  (texto manuscrito)
+     5: sticky_note       (post-its / notas adhesivas)
+
+  Con transfer learning bastan cientos de ejemplos por clase (en vez de
+  decenas de miles) para obtener un detector útil.
+
+5.2 El dataset
+
+  Formato YOLO estándar: por cada imagen .jpg hay un .txt con una línea por
+  objeto:  clase x_centro y_centro ancho alto  (valores normalizados 0-1).
+  Estructura:
+     trainer/data/images/train  (80% de las imágenes)
+     trainer/data/images/val    (20%, para validación)
+     trainer/data/labels/train  y  labels/val  (las etiquetas)
+     trainer/data/data.yaml     (declara rutas, número y nombres de clases)
+
+  Obtención de datos, dos vías complementarias:
+
+  a) DATASET SINTÉTICO AUTOMÁTICO (implementado en make_synthetic_qr.py):
+     genera QR con contenidos aleatorios realistas (redes WiFi, URLs,
+     credenciales, emails), los pega en posiciones, tamaños y rotaciones
+     aleatorias (±15°) sobre fondos generados con formas y colores variados,
+     y escribe automáticamente la etiqueta YOLO exacta de cada QR.
+     Ventaja: miles de ejemplos perfectamente etiquetados sin trabajo manual.
+     Es "data augmentation" llevado a generación completa del dato.
+
+  b) FOTOS REALES ETIQUETADAS A MANO: fotografías de oficinas, pantallas,
+     documentos, cédulas y notas, etiquetadas con Label Studio o LabelImg
+     (herramientas visuales: dibujas la caja, eliges la clase, exportan
+     formato YOLO). Recomendado: mínimo 150-300 imágenes por clase.
+     Las clases distintas de qr_code NECESITAN datos reales.
+
+5.3 Hiperparámetros y proceso (trainer/train.py)
+
+     modelo base:  yolo11n.pt (pre-entrenado COCO)
+     epochs:       100        (pasadas completas al dataset)
+     imgsz:        640        (resolución de entrenamiento, igual que en
+                               inferencia: coherencia train/serve)
+     batch:        16         (imágenes por paso de gradiente)
+     patience:     20         (EARLY STOPPING: si la métrica de validación
+                               no mejora en 20 epochs seguidas, se detiene
+                               solo; evita sobreajuste y ahorra tiempo)
+
+  Durante el entrenamiento, Ultralytics aplica automáticamente aumentación
+  de datos (mosaico de 4 imágenes, volteos, variaciones de color/HSV,
+  escalados y traslaciones), lo que multiplica la variedad efectiva del
+  dataset y mejora la generalización.
+
+  En cada epoch el modelo se evalúa contra el conjunto de VALIDACIÓN (imágenes
+  que nunca vio al entrenar) midiendo principalmente mAP50-95 (mean Average
+  Precision: qué tan bien coinciden las cajas predichas con las reales, a
+  distintos niveles de exigencia de solapamiento), además de precisión y
+  recall por clase. El checkpoint con mejor métrica de validación se guarda
+  como best.pt (por eso se llama así): no es el último epoch, es EL MEJOR.
+
+5.4 Despliegue del modelo entrenado
+
+  El trainer copia best.pt al volumen compartido ./models. El backend, al
+  arrancar, busca /models/best.pt:
+    - Si existe -> lo carga y trabaja con las 6 clases propias.
+    - Si NO existe -> carga el yolo11n.pt base (pre-descargado en la imagen
+      Docker durante el build) y lo registra en los logs. El sistema queda
+      operativo con clases COCO genéricas, y la detección de QR sigue
+      funcionando al 100% porque además del detector visual, TODA imagen se
+      escanea completa en el qr-service.
+  Esta doble vía hace que el proyecto sea demostrable desde el día 1 y
+  mejore progresivamente conforme se entrena.
+
+  Comandos (todo dentro de Docker, sin instalar nada en el host):
+     docker compose --profile train run --rm trainer python make_synthetic_qr.py 300
+     docker compose --profile train up trainer          # entrena -> best.pt
+     docker compose up -d backend                       # recarga el modelo
+
+  Nota de hardware: todo el stack corre en CPU (~1-4 s por imagen analizada).
+  El entrenamiento en CPU es lento (horas); con GPU NVIDIA +
+  nvidia-container-toolkit baja drásticamente (el docker-compose ya trae el
+  bloque de GPU listo para descomentar).
+
+
+6. CONTROL DE FALLOS (INGENIERÍA ALREDEDOR DE LA IA)
+--------------------------------------------------------------------------------
+Un sistema de IA aplicado necesita mitigar sus modos de fallo:
+
+  FALSOS POSITIVOS (censurar de más)
+    -> Umbral de confianza alto (0.75) con el modelo entrenado; solo se
+       difumina lo que el modelo asegura con alta certeza.
+
+  FALSOS NEGATIVOS DEL OCR (no leer una credencial que sí estaba)
+    -> Preprocesado de imagen (contraste + binarización adaptativa) antes
+       de leer; el blur de censura se aplica DESPUÉS de todo el análisis
+       para que el OCR nunca lea zonas ya difuminadas.
+
+  QR QUE EL DETECTOR VISUAL NO VE
+    -> Escaneo redundante de la imagen completa en el qr-service, con dos
+       motores (pyzbar + OpenCV) y deduplicación de resultados.
+
+  SATURACIÓN DEL SERVIDOR
+    -> Toda inferencia se hace a 640px; el trabajo pesado (YOLO, OCR,
+       decodificación) corre en threadpools para no bloquear el servidor
+       asíncrono; peticiones concurrentes no se estrangulan entre sí.
+
+  CAÍDA DE UN SERVICIO
+    -> Healthchecks en Docker Compose con arranque ordenado; si el
+       qr-service cae, el análisis continúa y reporta la advertencia en
+       lugar de fallar completo.
+
+  FUGA DE DATOS
+    -> Sin llamadas a internet en runtime (modelos pre-descargados durante
+       la construcción de las imágenes Docker); el qr-service no expone
+       puertos; todo viaja por la red interna fbi-net.
+
+
+7. STACK TECNOLÓGICO COMPLETO
+--------------------------------------------------------------------------------
+  IA / visión:      YOLO11n (Ultralytics 8.4), EasyOCR 1.7 (CRAFT + CRNN),
+                    PyTorch 2.4 (CPU), OpenCV 4.10
+  Backend:          Python 3.12, FastAPI, Uvicorn, httpx
+  Decodificación:   pyzbar (libzbar) + cv2.QRCodeDetector
+  Frontend:         React 18, Vite 5, nginx (proxy), CSS puro con
+                    animaciones (partículas canvas, typing, glow, reveal)
+  Infraestructura:  Docker Compose, 4 contenedores, red interna, volúmenes
+  Licencia:         AGPL-3.0 (obligatoria por Ultralytics; el proyecto es
+                    código abierto)
+
+
+8. RESUMEN EN UNA FRASE
+--------------------------------------------------------------------------------
+FBI-IMG es un sistema de prevención de fugas de información en imágenes que
+combina un detector de objetos entrenado por transfer learning (YOLO11),
+lectura neuronal de texto (EasyOCR) y reglas deterministas de riesgo, todo
+orquestado en microservicios Docker que corren completamente en local, capaz
+de encontrar, señalar y censurar automáticamente códigos QR, credenciales,
+documentos y cualquier dato comprometedor visible en una fotografía.
+================================================================================
