@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+node_modules/
+dist/
+models/*.pt
+models/fbi_run*/
+trainer/data/images/*/*
+trainer/data/labels/*/*
+!trainer/data/images/train/.gitkeep
+!trainer/data/images/val/.gitkeep
+!trainer/data/labels/train/.gitkeep
+!trainer/data/labels/val/.gitkeep
+.env.local

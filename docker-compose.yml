@@ -1,0 +1,67 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      network: host   # la red bridge de este host no tiene salida a internet
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [fbi-net]
+
+  backend:
+    build:
+      context: ./backend
+      network: host
+    ports:
+      - "8000:8000"
+    environment:
+      - QR_SERVICE_URL=http://qr-service:8100
+      - MODEL_PATH=/models/best.pt
+      - CONF_THRESHOLD=${CONF_THRESHOLD:-0.75}
+    volumes:
+      - ./models:/models:ro          # lee los pesos entrenados
+    depends_on:
+      qr-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks: [fbi-net]
+
+  qr-service:
+    build:
+      context: ./qr-service
+      network: host
+    # sin 'ports': solo accesible dentro de la red interna
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [fbi-net]
+
+  # Se ejecuta SOLO al entrenar:  docker compose --profile train up trainer
+  trainer:
+    build:
+      context: ./trainer
+      network: host
+    profiles: [train]
+    volumes:
+      - ./trainer/data:/workspace/data
+      - ./models:/workspace/models    # escribe best.pt aquí
+    # descomenta si tienes GPU NVIDIA + nvidia-container-toolkit:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+    networks: [fbi-net]
+
+networks:
+  fbi-net:
+    driver: bridge
