@@ -82,8 +82,8 @@ async def analyze(file: UploadFile = File(...), mode: str = Form("completo")):
                 qr_contents_seen.update(c["content"] for c in codes)
             risky = True
 
-        # MEDIO / COMPLETO -> OCR de credenciales sobre texto/documentos
-        if mode in ("medio", "completo") and d["class"] in OCR_CLASSES:
+        # MEDIO -> OCR de credenciales por región (completo usa escaneo global)
+        if mode == "medio" and d["class"] in OCR_CLASSES:
             creds = await run_in_threadpool(ocr.read_region, img, d["bbox"])
             if creds:
                 item["details"].extend(creds)
@@ -115,6 +115,21 @@ async def analyze(file: UploadFile = File(...), mode: str = Form("completo")):
                 blur_boxes.append(bbox)
                 item["redacted"] = True
             report.append(item)
+
+    # Modo COMPLETO: escaneo OCR de la imagen completa con diccionarios
+    # (credenciales, emails, tarjetas, fechas, nombres y rockyou -> alertas).
+    alerts = []
+    if mode == "completo":
+        full_text = await run_in_threadpool(ocr.read_full, img)
+        for f in full_text:
+            blur_boxes.append(f["bbox"])
+            item = {"class": f["kind"], "conf": f.get("conf"), "bbox": f["bbox"],
+                    "details": [f], "risky": True, "redacted": True,
+                    "source": "ocr-full"}
+            report.append(item)
+            if f.get("alert"):
+                alerts.append({"password": f["text"], "kind": f["kind"],
+                               "bbox": f["bbox"]})
 
     # Vista "señalar datos comprometedores": cajas sobre la imagen ORIGINAL
     # (antes del blur). Zonas de riesgo en ámbar, resto en verde, hallazgos
@@ -152,4 +167,6 @@ async def analyze(file: UploadFile = File(...), mode: str = Form("completo")):
     }
     if warnings:
         result["warnings"] = warnings
+    if alerts:
+        result["alerts"] = alerts
     return result

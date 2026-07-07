@@ -27,11 +27,11 @@ def main():
         batch=16,
         patience=20,               # early stopping
         project=str(MODELS),
-        name="fbi_run",
+        name="proto",
         exist_ok=True,
     )
     # Copia el mejor peso a la ruta que usa el backend
-    shutil.copy(MODELS / "fbi_run" / "weights" / "best.pt", MODELS / "best.pt")
+    shutil.copy(MODELS / "proto" / "weights" / "best.pt", MODELS / "best.pt")
     print("✅ best.pt listo en ./models/best.pt — reinicia el backend:")
     print("   docker compose up -d --build backend")
 

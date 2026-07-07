@@ -1,7 +1,9 @@
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+    libgl1 libglib2.0-0 wspanish wamerican && rm -rf /var/lib/apt/lists/*
+# wspanish -> /usr/share/dict/spanish ; wamerican -> /usr/share/dict/american-english
+# (palabras conocidas es+en: distinguir nombres propios y filtrar FP de rockyou)
 
 WORKDIR /app
 COPY requirements.txt .

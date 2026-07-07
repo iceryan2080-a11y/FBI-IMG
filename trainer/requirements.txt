@@ -4,3 +4,6 @@ torch==2.4.*
 torchvision==0.19.*
 qrcode==8.*
 Pillow==10.*
+zxing-cpp==2.2.*
+pandas==2.*
+matplotlib==3.*

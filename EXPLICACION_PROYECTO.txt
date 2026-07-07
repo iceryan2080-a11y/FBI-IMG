@@ -41,9 +41,32 @@ de menor a mayor profundidad de análisis:
                     contraseñas, usuarios/logins, correos electrónicos,
                     números de tarjeta (13-16 dígitos) y cédulas panameñas.
 
-  MODO COMPLETO  -> Todo lo anterior + CENSURA AUTOMÁTICA: aplica desenfoque
-                    gaussiano (OpenCV, kernel 51x51) sobre cada zona de riesgo,
-                    dejando la imagen segura para compartir.
+  MODO COMPLETO  -> Todo lo anterior + CENSURA AUTOMÁTICA + ESCANEO PROFUNDO
+                    CON DICCIONARIOS. Aplica desenfoque gaussiano (OpenCV,
+                    kernel 51x51) sobre cada zona de riesgo, dejando la imagen
+                    segura para compartir. Además:
+
+                    * Escanea con OCR la imagen COMPLETA (no solo las cajas del
+                      detector) buscando: credenciales, emails, tarjetas,
+                      cédulas, FECHAS (numéricas y "28 de enero de 2020") y
+                      NOMBRES PROPIOS. Cada hallazgo se difumina.
+
+                    * Detección de nombres con diccionario: un token en
+                      mayúscula que NO está en el diccionario español/inglés y
+                      no es una cabecera conocida (DRIVER LICENSE, etc.) se
+                      considera nombre propio y se censura. Típico en cédulas.
+
+                    * ALERTA DE CONTRASEÑAS FILTRADAS (rockyou): carga la mitad
+                      más común del diccionario rockyou (~7,2 millones de
+                      contraseñas reales filtradas). Si el OCR lee un token que
+                      está en rockyou, lo marca como ALERTA. Para no confundir
+                      prosa normal (que también abunda en rockyou), solo alerta
+                      si el token lleva dígitos/símbolos (12345678, abcd1234) o
+                      la línea tiene contexto de credencial ("password: ...").
+
+                    * IDs y tarjetas (id_card) -> censura TOTAL de la zona.
+                      Documentos (document) -> censura SELECTIVA (solo los
+                      nombres/fechas/datos sensibles, no el documento entero).
 
 Además de la imagen procesada, el sistema devuelve:
 
@@ -56,6 +79,17 @@ Además de la imagen procesada, el sistema devuelve:
     rojo = hallazgo confirmado (QR decodificado, credencial leída),
     ámbar = zona de riesgo, verde = detección sin riesgo. Cada palabra o
     frase sensible que encuentra el OCR lleva su propia caja con etiqueta.
+  - Una lista de ALERTAS (modo completo): contraseñas filtradas encontradas
+    en rockyou, mostradas de forma destacada.
+  - Un panel de REPORTE en la interfaz (gráficas): cuánto de la imagen
+    "cumple" (sin riesgo) frente a lo que "no cumple" (zonas sensibles
+    detectadas/censuradas), un desglose por tipo de hallazgo, y un historial
+    de los últimos análisis de la sesión con su nivel de riesgo. Gráficas
+    ligeras hechas con SVG/CSS (sin librerías externas).
+
+  BONUS - BOTÓN "EXTRACT (QR incompleto)": recupera datos de un QR dañado o
+  parcialmente tapado usando zxing-cpp (tolerante) + la corrección de errores
+  Reed-Solomon propia del formato QR. Flujo aparte del análisis normal.
 
 
 3. ARQUITECTURA: MICROSERVICIOS EN DOCKER
@@ -131,8 +165,12 @@ SIN IA (algoritmos clásicos deterministas — decisión de diseño consciente):
     geométrico exacto; no necesita red neuronal para leerse, y un algoritmo
     clásico es más fiable y barato.
   - Clasificación de riesgo del texto: expresiones regulares (patrones para
-    "WIFI:", "password/clave/pwd/pin", emails, tarjetas, cédulas, vCard).
-    Reglas explícitas = explicables y auditables, importante en seguridad.
+    "WIFI:", "password/clave/pwd/pin", emails, tarjetas, cédulas, vCard,
+    fechas). Reglas explícitas = explicables y auditables, importante en
+    seguridad.
+  - Diccionarios (modo completo): español (wspanish) + inglés (wamerican)
+    para distinguir nombres propios, y rockyou (mitad más común) como lista
+    negra de contraseñas filtradas. Son búsquedas en conjuntos (sets), no IA.
   - Censura: desenfoque gaussiano de OpenCV. La anotación: dibujo de
     rectángulos y etiquetas.
 
@@ -241,8 +279,13 @@ comportamiento crítico del sistema es predecible y explicable.
 Un sistema de IA aplicado necesita mitigar sus modos de fallo:
 
   FALSOS POSITIVOS (censurar de más)
-    -> Umbral de confianza alto (0.75) con el modelo entrenado; solo se
-       difumina lo que el modelo asegura con alta certeza.
+    -> Umbral de confianza POR CLASE: el detector da confianzas distintas
+       según la clase y el tamaño del dataset. QR (fácil, muchos ejemplos)
+       usa umbral alto; id_card/document (pocos ejemplos, confianza baja)
+       usan umbral más permisivo para no perderlos. Configurable en config.py.
+    -> Alertas de rockyou de alta precisión: se ignora la prosa normal que
+       también vive en rockyou (documentos, gracias, STREET); solo alerta si
+       el token parece contraseña (dígitos/símbolos o contexto de credencial).
 
   FALSOS NEGATIVOS DEL OCR (no leer una credencial que sí estaba)
     -> Preprocesado de imagen (contraste + binarización adaptativa) antes
@@ -274,9 +317,13 @@ Un sistema de IA aplicado necesita mitigar sus modos de fallo:
   IA / visión:      YOLO11n (Ultralytics 8.4), EasyOCR 1.7 (CRAFT + CRNN),
                     PyTorch 2.4 (CPU), OpenCV 4.10
   Backend:          Python 3.12, FastAPI, Uvicorn, httpx
-  Decodificación:   pyzbar (libzbar) + cv2.QRCodeDetector
+  Decodificación:   pyzbar (libzbar) + cv2.QRCodeDetector + zxing-cpp
+                    (recuperación de QR dañados)
+  Diccionarios:     wspanish + wamerican (nombres propios), rockyou
+                    (contraseñas filtradas, mitad más común)
   Frontend:         React 18, Vite 5, nginx (proxy), CSS puro con
-                    animaciones (partículas canvas, typing, glow, reveal)
+                    animaciones (partículas canvas, typing, glow, reveal),
+                    gráficas de reporte en SVG/CSS (sin librerías)
   Infraestructura:  Docker Compose, 4 contenedores, red interna, volúmenes
   Licencia:         AGPL-3.0 (obligatoria por Ultralytics; el proyecto es
                     código abierto)

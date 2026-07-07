@@ -20,8 +20,12 @@ services:
       - QR_SERVICE_URL=http://qr-service:8100
       - MODEL_PATH=/models/best.pt
       - CONF_THRESHOLD=${CONF_THRESHOLD:-0.75}
+      - ROCKYOU_PATH=/dicts/rockyou.txt
+      - ROCKYOU_FRACTION=${ROCKYOU_FRACTION:-0.5}   # "la mitad" del diccionario
     volumes:
       - ./models:/models:ro          # lee los pesos entrenados
+      # rockyou del host (solo lectura). Ajusta ROCKYOU_HOST en .env si cambia.
+      - ${ROCKYOU_HOST:-/home/asti20/Desktop/DICCIONARIOS/rockyou.txt}:/dicts/rockyou.txt:ro
     depends_on:
       qr-service:
         condition: service_healthy

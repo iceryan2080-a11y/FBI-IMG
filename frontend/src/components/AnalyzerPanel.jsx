@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { analyzeImage, extractQr } from "../api.js";
 import useReveal from "../useReveal.js";
+import Report from "./Report.jsx";
 
 const RISK_COLORS = {
   wifi: "amber", credential: "red", email: "amber", vcard: "amber",
   url: "green", login: "red", card: "red", id_pa: "red", generic: "green",
+  name: "amber", date: "amber", leaked_pwd: "red", weak_pwd: "red",
 };
 
 function Counter({ value }) {
@@ -43,6 +45,8 @@ export default function AnalyzerPanel() {
   // botón "Extract": recuperación de QR incompletos (flujo aparte)
   const [extract, setExtract] = useState(null);
   const [extracting, setExtracting] = useState(false);
+  // historial de análisis de la sesión (para el reporte)
+  const [history, setHistory] = useState([]);
 
   useEffect(() => () => previewUrl && URL.revokeObjectURL(previewUrl), [previewUrl]);
 
@@ -75,8 +79,14 @@ export default function AnalyzerPanel() {
     setLoading(true);
     setError(null);
     try {
-      setResult(await analyzeImage(file, mode));
+      const r = await analyzeImage(file, mode);
+      setResult(r);
       setView("procesada");
+      setHistory((h) => [...h, {
+        n: h.length + 1, mode,
+        total: r.total_detections, risky: r.risky_count,
+        alerts: r.alerts?.length || 0,
+      }]);
     } catch (e) {
       setResult(null);
       setError(e.message);
@@ -168,6 +178,20 @@ export default function AnalyzerPanel() {
             {(loading || extracting) && <div className="progress"><div className="progress-bar" /></div>}
             {error && <p className="error">✖ {error}</p>}
 
+            {result?.alerts?.length > 0 && (
+              <div className="alert-box">
+                <p className="alert-head">
+                  ⚠ ALERTA: <strong>{result.alerts.length}</strong> contraseña(s) filtrada(s) detectada(s) en rockyou
+                </p>
+                {result.alerts.map((a, i) => (
+                  <div key={i} className="alert-item">
+                    <Badge kind={a.kind} />
+                    <code>{a.password}</code>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {extract && (
               <div className="extract-box">
                 <p className="extract-head">
@@ -243,6 +267,10 @@ export default function AnalyzerPanel() {
                   <pre>{JSON.stringify(result.report, null, 2)}</pre>
                 </details>
               </div>
+            )}
+
+            {(result || history.length > 0) && (
+              <Report result={result} history={history} />
             )}
           </div>
         </div>
